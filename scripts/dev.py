@@ -1,25 +1,33 @@
+import argparse
 import sys
-import os
+from pathlib import Path
 
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
-from database.run_sql import run_sql_file
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from database.run_sql import run_migrations, run_sql_file
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Local database development commands")
+    parser.add_argument("command", choices=("migrate", "seed", "reset"))
+    return parser.parse_args()
+
 
 def main():
-    command = sys.argv[1]
+    args = parse_args()
 
-    if command == "migrate":
-        run_sql_file("database/migrations/001_init.sql")
+    if args.command == "migrate":
+        run_migrations()
+        return
 
-    elif command == "seed":
-        run_sql_file("database/seeds/seed.sql")
+    if args.command == "reset":
+        # Kept for compatibility: this applies pending migrations before seeding.
+        run_migrations()
 
-    elif command == "reset":
-        run_sql_file("database/migrations/001_init.sql")
-        run_sql_file("database/seeds/seed.sql")
+    run_sql_file(PROJECT_ROOT / "database" / "seeds" / "seed.sql")
 
-    else:
-        print("Unknown command")
 
 if __name__ == "__main__":
     main()
