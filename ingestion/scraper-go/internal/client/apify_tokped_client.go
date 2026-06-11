@@ -1,65 +1,45 @@
 package client
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"log/slog"
-	"net/http"
-	"net/url"
 	"os"
-	"time"
 )
 
-const tokopediaActorID = "jupri~tokopedia-scraper"
+const defaultTokopediaActorID = "fatihtahta~tokopedia-scraper"
 
-type apifyInput struct {
-	Search   string `json:"search"`
-	MaxItems int    `json:"maxItems"`
+type tokopediaInput struct {
+	Queries            []string                    `json:"queries"`
+	Limit              int                         `json:"limit"`
+	ProxyConfiguration tokopediaProxyConfiguration `json:"proxyConfiguration"`
 }
 
-func RunTokopediaScraper(ctx context.Context, keyword string) ([]byte, error) {
-	apiKey := os.Getenv("APIFY_TOKOPEDIA_TOKEN")
+type tokopediaProxyConfiguration struct {
+	UseApifyProxy bool `json:"useApifyProxy"`
+}
+
+func RunTokopediaScraper(ctx context.Context, keyword string, maxItems int, maxChargeUSD float64) ([]byte, error) {
+	apiKey := os.Getenv("TOKOPEDIA_APIFY_KEY")
 	if apiKey == "" {
-		return nil, fmt.Errorf("APIFY_TOKOPEDIA_TOKEN is required")
+		return nil, fmt.Errorf("TOKOPEDIA_APIFY_KEY is required")
 	}
+	actorID := envOrDefault("TOKOPEDIA_APIFY_ACTOR", defaultTokopediaActorID)
+	input := tokopediaInput{
+		Queries: []string{keyword},
+		Limit:   maxItems,
+		ProxyConfiguration: tokopediaProxyConfiguration{
+			UseApifyProxy: true,
+		},
+	}
+	return newApifyRunner().runActor(ctx, apiKey, actorID, input, apifyRunOptions{
+		MaxItems:     maxItems,
+		MaxChargeUSD: maxChargeUSD,
+	})
+}
 
-	endpoint := &url.URL{
-		Scheme: "https",
-		Host:   "api.apify.com",
-		Path:   "/v2/acts/" + tokopediaActorID + "/run-sync-get-dataset-items",
+func envOrDefault(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
 	}
-	query := endpoint.Query()
-	query.Set("token", apiKey)
-	endpoint.RawQuery = query.Encode()
-
-	body, err := json.Marshal(apifyInput{Search: keyword, MaxItems: 10})
-	if err != nil {
-		return nil, fmt.Errorf("encode Apify input: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("create Apify request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-
-	baseClient := &http.Client{Timeout: 2 * time.Minute}
-	resp, err := NewRetryClient(baseClient, slog.Default()).Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("run Tokopedia actor: %w", err)
-	}
-	defer resp.Body.Close()
-
-	responseBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read Tokopedia actor response: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("Tokopedia actor returned status %d: %s", resp.StatusCode, string(responseBody))
-	}
-	return responseBody, nil
+	return fallback
 }

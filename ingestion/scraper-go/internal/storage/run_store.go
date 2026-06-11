@@ -14,9 +14,11 @@ type RunStore struct {
 }
 
 type RunStart struct {
-	Source string
-	Query  string
-	City   string
+	Source       string
+	Query        string
+	City         string
+	MaxItems     int
+	MaxChargeUSD float64
 }
 
 type RunFinish struct {
@@ -46,9 +48,11 @@ func (s *RunStore) Close() error {
 }
 
 func (s *RunStore) Start(ctx context.Context, run RunStart) (int64, error) {
-	metadata, err := json.Marshal(map[string]string{
-		"product_query": run.Query,
-		"city":          run.City,
+	metadata, err := json.Marshal(map[string]any{
+		"product_query":  run.Query,
+		"city":           run.City,
+		"max_items":      run.MaxItems,
+		"max_charge_usd": run.MaxChargeUSD,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("encode run metadata: %w", err)

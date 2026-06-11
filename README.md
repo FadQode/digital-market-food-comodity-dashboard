@@ -1,8 +1,9 @@
 # Marketplace Food Price Pipeline
 
 This project collects Indonesian marketplace prices and BMKG data as raw JSON.
-Every scrape job is rate-limited, retried, logged as JSON, and recorded in
-PostgreSQL.
+Every scrape job is logged as JSON and recorded in PostgreSQL. Public BMKG GET
+requests use rate limiting and retries; paid marketplace Actor POST requests
+use hard cost limits and are never retried automatically.
 
 ## Setup
 
@@ -11,7 +12,7 @@ Requirements:
 - Go 1.21 or newer
 - PostgreSQL
 - [Goose](https://github.com/pressly/goose)
-- an Apify Tokopedia actor token for the `tokopedia` job
+- Apify tokens for paid Tokopedia and Shopee jobs
 
 Create `.env` from `.env.example`, set `DATABASE_URL`, and install Goose:
 
@@ -28,8 +29,10 @@ bash scripts/migrate.sh
 ```
 
 Migrations live in `database/migrations` and use Goose `Up` and `Down`
-sections. The legacy Python migration command remains available for local
-development:
+sections. Goose is the canonical migration tool used by local runs and GitHub
+Actions. The legacy Python command remains available for existing local
+databases, but do not alternate migration tools for the same database because
+they maintain separate migration histories:
 
 ```bash
 python scripts/dev.py migrate
@@ -58,8 +61,39 @@ bash ingestion/scraper-go/run_scraper.sh \
   -jobs bmkg-latest-earthquake,bmkg-recent-earthquakes
 ```
 
-Raw responses are written to `data/raw`. A fatal job error produces a non-zero
-process exit code, allowing GitHub Actions to mark the run failed.
+Paid marketplace jobs are blocked unless explicitly enabled. A conservative
+pilot run collects at most 20 results per marketplace and caps each Actor run
+at USD 0.07:
+
+```bash
+bash ingestion/scraper-go/run_scraper.sh \
+  -jobs tokopedia,shopee \
+  -query "beras 5 kg" \
+  -marketplace-max-items 20 \
+  -apify-max-charge-usd 0.07 \
+  -print-plan
+```
+
+`-print-plan` does not connect to PostgreSQL or external APIs and does not print
+tokens. After reviewing that output, enable the paid calls explicitly:
+
+```bash
+bash ingestion/scraper-go/run_scraper.sh \
+  -jobs tokopedia,shopee \
+  -query "beras 5 kg" \
+  -allow-paid-apis \
+  -marketplace-max-items 20 \
+  -apify-max-charge-usd 0.07
+```
+
+The Apify Actor POST is intentionally not retried because a retry can start a
+second paid run when the first response is lost. HTTP retry/backoff remains
+enabled for public BMKG GET requests.
+
+Raw responses are written to `data/raw` with names such as
+`run-42-tokopedia.json`, so a later scrape does not overwrite an earlier run.
+A fatal job error produces a non-zero process exit code, allowing GitHub
+Actions to mark the run failed.
 
 ## Checking Run History
 
@@ -77,18 +111,31 @@ Each selected job creates its own row. Status changes from `running` to
 ## Environment Variables
 
 - `DATABASE_URL`: required PostgreSQL connection string
-- `APIFY_TOKOPEDIA_TOKEN`: required for the Tokopedia job
+- `TOKOPEDIA_APIFY_KEY`: required for the Tokopedia job
+- `SHOPEE_APIFY_KEY`: required for the Shopee job
+- `TOKOPEDIA_APIFY_ACTOR`: optional Actor override
+- `SHOPEE_APIFY_ACTOR`: optional Actor override
 - `SCRAPE_JOBS`: comma-separated job names
-- `SCRAPE_QUERY`: marketplace query, default `beras`
+- `SCRAPE_QUERY`: marketplace query, default `beras 5 kg`
 - `SCRAPE_CITY`: optional run metadata, default empty
+- `ALLOW_PAID_APIS`: must be `true` before paid jobs can run
+- `MARKETPLACE_MAX_ITEMS`: paid results per marketplace job, default `20`
+- `APIFY_MAX_CHARGE_USD`: hard charge cap per Actor invocation, default `0.07`
 - `BMKG_ADM4`: required when the `bmkg-weather` job is selected
 - `DATA_DIR`: raw JSON output directory, default `data/raw` relative to the repo
 
-Available jobs are `tokopedia`, `bmkg-weather`, `bmkg-latest-earthquake`, and
-`bmkg-recent-earthquakes`.
+Available jobs are `tokopedia`, `shopee`, `bmkg-weather`,
+`bmkg-latest-earthquake`, and `bmkg-recent-earthquakes`.
+
+`SCRAPE_CITY` is run metadata; it does not currently filter Actor search
+results. Seller location must be normalized from each returned listing.
 
 ## Scheduling
 
-`.github/workflows/scrape.yml` runs daily at 01:00 UTC (08:00 WIB) and can also
-be started manually. Add `DATABASE_URL` and `APIFY_TOKOPEDIA_TOKEN` as GitHub
-Actions repository secrets before enabling the workflow.
+`.github/workflows/scrape.yml` runs each Monday at 01:00 UTC (08:00 WIB) and can
+also be started manually. Add `DATABASE_URL`, `TOKOPEDIA_APIFY_KEY`, and
+`SHOPEE_APIFY_KEY` as GitHub Actions repository secrets. Each workflow run
+uploads its raw JSON files as a GitHub Actions artifact retained for 14 days.
+
+The sampling and budget rationale is documented in
+[`docs/MINING_STRATEGY.md`](docs/MINING_STRATEGY.md).

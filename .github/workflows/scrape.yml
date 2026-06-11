@@ -1,8 +1,8 @@
-name: Daily scrape
+name: Weekly marketplace scrape
 
 on:
   schedule:
-    - cron: "0 1 * * *"
+    - cron: "0 1 * * 1"
   workflow_dispatch:
 
 jobs:
@@ -28,9 +28,23 @@ jobs:
 
       - name: Run scraper
         env:
-          APIFY_TOKOPEDIA_TOKEN: ${{ secrets.APIFY_TOKOPEDIA_TOKEN }}
+          TOKOPEDIA_APIFY_KEY: ${{ secrets.TOKOPEDIA_APIFY_KEY }}
+          SHOPEE_APIFY_KEY: ${{ secrets.SHOPEE_APIFY_KEY }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SCRAPE_JOBS: tokopedia,shopee
           SCRAPE_CITY: surabaya
-          SCRAPE_QUERY: beras
+          SCRAPE_QUERY: beras 5 kg
+          ALLOW_PAID_APIS: "true"
+          MARKETPLACE_MAX_ITEMS: "20"
+          APIFY_MAX_CHARGE_USD: "0.07"
         working-directory: ingestion/scraper-go
         run: go run ./cmd/scraper
+
+      - name: Upload raw scrape output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw-scrape-${{ github.run_id }}
+          path: data/raw/run-*.json
+          if-no-files-found: warn
+          retention-days: 14

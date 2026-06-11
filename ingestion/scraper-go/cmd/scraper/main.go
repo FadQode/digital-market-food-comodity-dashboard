@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,14 +17,17 @@ import (
 	"ingestion/scraper-go/internal/storage"
 )
 
-const defaultJobs = "tokopedia,bmkg-latest-earthquake,bmkg-recent-earthquakes"
+const defaultJobs = "bmkg-latest-earthquake,bmkg-recent-earthquakes"
 
 type scrapeJob struct {
-	name     string
-	query    string
-	city     string
-	filename string
-	scrape   func(context.Context) ([]byte, int, error)
+	name         string
+	query        string
+	city         string
+	filename     string
+	paid         bool
+	maxItems     int
+	maxChargeUSD float64
+	scrape       func(context.Context) ([]byte, int, error)
 }
 
 func main() {
@@ -45,15 +49,60 @@ func run() int {
 	slog.SetDefault(logger)
 
 	jobsValue := flag.String("jobs", envOrDefault("SCRAPE_JOBS", defaultJobs), "comma-separated scrape jobs")
-	query := flag.String("query", envOrDefault("SCRAPE_QUERY", "beras"), "marketplace product query")
+	query := flag.String("query", envOrDefault("SCRAPE_QUERY", "beras 5 kg"), "marketplace product query")
 	city := flag.String("city", os.Getenv("SCRAPE_CITY"), "target city metadata")
+	allowPaidAPIs := flag.Bool("allow-paid-apis", envBoolOrDefault("ALLOW_PAID_APIS", false), "allow jobs that can consume paid API budget")
+	maxItems := flag.Int("marketplace-max-items", envIntOrDefault("MARKETPLACE_MAX_ITEMS", 20), "maximum paid marketplace results per job")
+	maxChargeUSD := flag.Float64("apify-max-charge-usd", envFloatOrDefault("APIFY_MAX_CHARGE_USD", 0.07), "maximum Apify charge per marketplace job")
+	printPlan := flag.Bool("print-plan", false, "print the scrape plan without connecting to the database or external APIs")
 	bmkgADM4 := flag.String("bmkg-adm4", os.Getenv("BMKG_ADM4"), "BMKG fourth-level administrative code")
 	outputDir := flag.String("output-dir", envOrDefault("DATA_DIR", "../../data/raw"), "directory for raw JSON output")
-	timeout := flag.Duration("timeout", 5*time.Minute, "maximum duration for all scrape jobs")
+	timeout := flag.Duration("timeout", 8*time.Minute, "maximum duration for all scrape jobs")
 	flag.Parse()
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
+
+	if *maxItems < 10 || *maxItems > 200 {
+		logger.Error("invalid scraper configuration", "event", "scraper_init_failed", "reason", "marketplace-max-items must be between 10 and 200")
+		return 1
+	}
+	if *maxChargeUSD <= 0 || *maxChargeUSD > 1 {
+		logger.Error("invalid scraper configuration", "event", "scraper_init_failed", "reason", "apify-max-charge-usd must be greater than 0 and at most 1")
+		return 1
+	}
+
+	jobs, err := buildJobs(*jobsValue, *query, *city, *bmkgADM4, *maxItems, *maxChargeUSD)
+	if err != nil {
+		logger.Error("invalid scraper configuration", "event", "scraper_init_failed", "reason", err)
+		return 1
+	}
+	if *printPlan {
+		for _, job := range jobs {
+			logger.Info("scrape plan",
+				"event", "scrape_plan",
+				"platform", job.name,
+				"query", job.query,
+				"city", job.city,
+				"paid", job.paid,
+				"max_items", job.maxItems,
+				"max_charge_usd", job.maxChargeUSD,
+			)
+		}
+		return 0
+	}
+	if !*allowPaidAPIs {
+		for _, job := range jobs {
+			if job.paid {
+				logger.Error("paid API job blocked",
+					"event", "paid_api_blocked",
+					"platform", job.name,
+					"reason", "set ALLOW_PAID_APIS=true or pass -allow-paid-apis after reviewing the run plan",
+				)
+				return 1
+			}
+		}
+	}
 
 	store, err := storage.OpenRunStore(ctx, os.Getenv("DATABASE_URL"))
 	if err != nil {
@@ -62,11 +111,6 @@ func run() int {
 	}
 	defer store.Close()
 
-	jobs, err := buildJobs(*jobsValue, *query, *city, *bmkgADM4)
-	if err != nil {
-		logger.Error("invalid scraper configuration", "event", "scraper_init_failed", "reason", err)
-		return 1
-	}
 	if err := os.MkdirAll(*outputDir, 0o755); err != nil {
 		logger.Error("create output directory", "event", "scraper_init_failed", "reason", err)
 		return 1
@@ -87,7 +131,13 @@ func run() int {
 }
 
 func executeJob(ctx context.Context, store *storage.RunStore, logger *slog.Logger, outputDir string, job scrapeJob) error {
-	runID, err := store.Start(ctx, storage.RunStart{Source: job.name, Query: job.query, City: job.city})
+	runID, err := store.Start(ctx, storage.RunStart{
+		Source:       job.name,
+		Query:        job.query,
+		City:         job.city,
+		MaxItems:     job.maxItems,
+		MaxChargeUSD: job.maxChargeUSD,
+	})
 	if err != nil {
 		return fmt.Errorf("%s: %w", job.name, err)
 	}
@@ -99,14 +149,17 @@ func executeJob(ctx context.Context, store *storage.RunStore, logger *slog.Logge
 		"platform", job.name,
 		"query", job.query,
 		"city", job.city,
+		"max_items", job.maxItems,
+		"max_charge_usd", job.maxChargeUSD,
 	)
 
 	data, recordsFound, scrapeErr := job.scrape(ctx)
 	recordsSaved := 0
+	outputPath := ""
 	if scrapeErr == nil {
-		path := filepath.Join(outputDir, job.filename)
-		if err := storage.SaveJSON(path, data); err != nil {
-			scrapeErr = fmt.Errorf("save %s: %w", path, err)
+		outputPath = runOutputPath(outputDir, job.filename, runID)
+		if err := storage.SaveJSON(outputPath, data); err != nil {
+			scrapeErr = fmt.Errorf("save %s: %w", outputPath, err)
 		} else {
 			recordsSaved = recordsFound
 		}
@@ -146,18 +199,34 @@ func executeJob(ctx context.Context, store *storage.RunStore, logger *slog.Logge
 		"platform", job.name,
 		"fetched", recordsFound,
 		"failed", recordsFailed,
+		"output_path", outputPath,
 		"duration_ms", duration.Milliseconds(),
 	)
 	return nil
 }
 
-func buildJobs(value, query, city, bmkgADM4 string) ([]scrapeJob, error) {
+func runOutputPath(outputDir, filename string, runID int64) string {
+	extension := filepath.Ext(filename)
+	name := strings.TrimSuffix(filepath.Base(filename), extension)
+	return filepath.Join(outputDir, fmt.Sprintf("run-%d-%s%s", runID, name, extension))
+}
+
+func buildJobs(value, query, city, bmkgADM4 string, maxItems int, maxChargeUSD float64) ([]scrapeJob, error) {
 	available := map[string]func() scrapeJob{
 		"tokopedia": func() scrapeJob {
 			return scrapeJob{
-				name: "tokopedia", query: query, city: city, filename: "tokopedia.json",
+				name: "tokopedia", query: query, city: city, filename: "tokopedia.json", paid: true, maxItems: maxItems, maxChargeUSD: maxChargeUSD,
 				scrape: func(ctx context.Context) ([]byte, int, error) {
-					data, err := scraper.ScrapeTokopedia(ctx, query)
+					data, err := scraper.ScrapeTokopedia(ctx, query, maxItems, maxChargeUSD)
+					return data, countJSONRecords(data), err
+				},
+			}
+		},
+		"shopee": func() scrapeJob {
+			return scrapeJob{
+				name: "shopee", query: query, city: city, filename: "shopee.json", paid: true, maxItems: maxItems, maxChargeUSD: maxChargeUSD,
+				scrape: func(ctx context.Context) ([]byte, int, error) {
+					data, err := scraper.ScrapeShopee(ctx, query, maxItems, maxChargeUSD)
 					return data, countJSONRecords(data), err
 				},
 			}
@@ -250,4 +319,40 @@ func envOrDefault(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func envIntOrDefault(name string, fallback int) int {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envFloatOrDefault(name string, fallback float64) float64 {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envBoolOrDefault(name string, fallback bool) bool {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
