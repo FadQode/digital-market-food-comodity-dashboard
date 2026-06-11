@@ -2,17 +2,33 @@ import hashlib
 import os
 from pathlib import Path
 
-import psycopg2
-from dotenv import load_dotenv
-
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MIGRATIONS_DIR = PROJECT_ROOT / "database" / "migrations"
+LEGACY_MIGRATION_CHECKSUMS = {
+    "001_init.sql": "e811230cccaa001d478bb1ba06b18d1022f501a0bf1bd786a08b1677585df107",
+    "002_create_scrape_runs.sql": "689a239b3965343a18b9c26b46e75e3f0c1c9b00096b70737d5e1ed6d06863d5",
+    "003_create_products_raw.sql": "f0479c342ec6e21ea184db898bad0a1610b4f38135108d657d634f3dc7f7e24f",
+    "004_create_data_quality_log.sql": "8e424291d2392c40616a7cbff9abfe9dee910937e9dbae4275546a9660a0e283",
+    "005_add_data_foundation_indexes.sql": "d9d1f7494a198ee8f05e31f06ff9a65523490b71ec112ab30c9854f01050592d",
+}
 
-load_dotenv(PROJECT_ROOT / ".env")
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
+
+if load_dotenv is not None:
+    load_dotenv(PROJECT_ROOT / ".env")
 
 
 def connect_database():
+    try:
+        import psycopg2
+    except ImportError as exc:
+        raise RuntimeError(
+            "psycopg2 is required for database commands; install requirements.txt"
+        ) from exc
+
     database_url = os.getenv("DATABASE_URL")
     if database_url:
         return psycopg2.connect(database_url)
@@ -49,6 +65,16 @@ def _checksum(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _read_up_migration(path):
+    sql = path.read_text(encoding="utf-8")
+    up_marker = "-- +goose Up"
+    down_marker = "-- +goose Down"
+    if up_marker not in sql:
+        return sql
+    up_sql = sql.split(up_marker, 1)[1]
+    return up_sql.split(down_marker, 1)[0]
+
+
 def run_migrations(migrations_dir=MIGRATIONS_DIR, connection=None):
     migrations = discover_migrations(migrations_dir)
     if not migrations:
@@ -78,16 +104,26 @@ def run_migrations(migrations_dir=MIGRATIONS_DIR, connection=None):
             previous_checksum = applied.get(path.name)
 
             if previous_checksum:
-                if previous_checksum.strip() != checksum:
-                    raise RuntimeError(
-                        f"Applied migration has changed: {path.name}. "
-                        "Create a new migration instead of editing it."
-                    )
-                continue
+                previous_checksum = previous_checksum.strip()
+                if previous_checksum == checksum:
+                    continue
+                if previous_checksum == LEGACY_MIGRATION_CHECKSUMS.get(path.name):
+                    with conn:
+                        with conn.cursor() as cursor:
+                            cursor.execute(
+                                "UPDATE schema_migrations SET checksum = %s "
+                                "WHERE filename = %s",
+                                (checksum, path.name),
+                            )
+                    continue
+                raise RuntimeError(
+                    f"Applied migration has changed: {path.name}. "
+                    "Create a new migration instead of editing it."
+                )
 
             with conn:
                 with conn.cursor() as cursor:
-                    cursor.execute(path.read_text(encoding="utf-8"))
+                    cursor.execute(_read_up_migration(path))
                     cursor.execute(
                         "INSERT INTO schema_migrations (filename, checksum) VALUES (%s, %s)",
                         (path.name, checksum),

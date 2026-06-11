@@ -1,9 +1,11 @@
 package scraper
 
 import (
-    "ingestion/scraper-go/internal/client"
+	"context"
+
+	"ingestion/scraper-go/internal/client"
 )
 
-func ScrapeTokopedia(keyword string) ([]byte, error) {
-    return client.RunTokopediaScraper(keyword)
+func ScrapeTokopedia(ctx context.Context, keyword string) ([]byte, error) {
+	return client.RunTokopediaScraper(ctx, keyword)
 }

@@ -1,123 +1,253 @@
 package main
 
 import (
-    "context"
-    "encoding/json"
-    "fmt"
-    "log"
-    "time"
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
 
-    "ingestion/scraper-go/internal/scraper"
-    "ingestion/scraper-go/internal/storage"
+	"ingestion/scraper-go/internal/scraper"
+	"ingestion/scraper-go/internal/storage"
 )
 
+const defaultJobs = "tokopedia,bmkg-latest-earthquake,bmkg-recent-earthquakes"
+
+type scrapeJob struct {
+	name     string
+	query    string
+	city     string
+	filename string
+	scrape   func(context.Context) ([]byte, int, error)
+}
+
 func main() {
-    // Create context with timeout for all scraping operations
-    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-    defer cancel()
-
-    // Scrape Tokopedia
-    fmt.Println("Starting Tokopedia scraping for 'beras'...")
-    if err := scrapeTokopedia(ctx); err != nil {
-        log.Printf("Error scraping Tokopedia: %v", err)
-    } else {
-        fmt.Println("✓ Tokopedia scraping completed successfully")
-    }
-
-    // Scrape BMKG Weather Forecast
-    fmt.Println("\nStarting BMKG weather forecast scraping...")
-    if err := scrapeBMKGWeather(ctx); err != nil {
-        log.Printf("Error scraping BMKG weather: %v", err)
-    } else {
-        fmt.Println("✓ BMKG weather forecast scraping completed successfully")
-    }
-
-    // Scrape BMKG Latest Earthquake
-    fmt.Println("\nStarting BMKG latest earthquake scraping...")
-    if err := scrapeBMKGLatestEarthquake(ctx); err != nil {
-        log.Printf("Error scraping BMKG latest earthquake: %v", err)
-    } else {
-        fmt.Println("✓ BMKG latest earthquake scraping completed successfully")
-    }
-
-    // Scrape BMKG Recent Earthquakes
-    fmt.Println("\nStarting BMKG recent earthquakes scraping...")
-    if err := scrapeBMKGRecentEarthquakes(ctx); err != nil {
-        log.Printf("Error scraping BMKG recent earthquakes: %v", err)
-    } else {
-        fmt.Println("✓ BMKG recent earthquakes scraping completed successfully")
-    }
-
-    fmt.Println("\n=== All scraping operations completed ===")
+	os.Exit(run())
 }
 
-// scrapeTokopedia scrapes Tokopedia product data
-func scrapeTokopedia(ctx context.Context) error {
-    data, err := scraper.ScrapeTokopedia("beras")
-    if err != nil {
-        return fmt.Errorf("failed to scrape Tokopedia: %w", err)
-    }
+func run() int {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		ReplaceAttr: func(groups []string, attr slog.Attr) slog.Attr {
+			if len(groups) == 0 && attr.Key == slog.TimeKey {
+				attr.Key = "ts"
+			}
+			if len(groups) == 0 && attr.Key == slog.LevelKey {
+				attr.Value = slog.StringValue(strings.ToLower(attr.Value.String()))
+			}
+			return attr
+		},
+	}))
+	slog.SetDefault(logger)
 
-    if err := storage.SaveJSON("../../data/raw/tokopedia.json", data); err != nil {
-        return fmt.Errorf("failed to save Tokopedia data: %w", err)
-    }
+	jobsValue := flag.String("jobs", envOrDefault("SCRAPE_JOBS", defaultJobs), "comma-separated scrape jobs")
+	query := flag.String("query", envOrDefault("SCRAPE_QUERY", "beras"), "marketplace product query")
+	city := flag.String("city", os.Getenv("SCRAPE_CITY"), "target city metadata")
+	bmkgADM4 := flag.String("bmkg-adm4", os.Getenv("BMKG_ADM4"), "BMKG fourth-level administrative code")
+	outputDir := flag.String("output-dir", envOrDefault("DATA_DIR", "../../data/raw"), "directory for raw JSON output")
+	timeout := flag.Duration("timeout", 5*time.Minute, "maximum duration for all scrape jobs")
+	flag.Parse()
 
-    return nil
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+
+	store, err := storage.OpenRunStore(ctx, os.Getenv("DATABASE_URL"))
+	if err != nil {
+		logger.Error("scraper initialization failed", "event", "scraper_init_failed", "reason", err)
+		return 1
+	}
+	defer store.Close()
+
+	jobs, err := buildJobs(*jobsValue, *query, *city, *bmkgADM4)
+	if err != nil {
+		logger.Error("invalid scraper configuration", "event", "scraper_init_failed", "reason", err)
+		return 1
+	}
+	if err := os.MkdirAll(*outputDir, 0o755); err != nil {
+		logger.Error("create output directory", "event", "scraper_init_failed", "reason", err)
+		return 1
+	}
+
+	var failures []error
+	for _, job := range jobs {
+		if err := executeJob(ctx, store, logger, *outputDir, job); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	if len(failures) > 0 {
+		logger.Error("scrape batch failed", "event", "scrape_batch_failed", "failed_jobs", len(failures))
+		return 1
+	}
+	logger.Info("scrape batch complete", "event", "scrape_batch_complete", "jobs", len(jobs))
+	return 0
 }
 
-// scrapeBMKGWeather scrapes BMKG weather forecast data
-func scrapeBMKGWeather(ctx context.Context) error {
-    data, err := scraper.ScrapeWeatherForecast(ctx, "")
-    if err != nil {
-        return fmt.Errorf("failed to scrape BMKG weather forecast: %w", err)
-    }
+func executeJob(ctx context.Context, store *storage.RunStore, logger *slog.Logger, outputDir string, job scrapeJob) error {
+	runID, err := store.Start(ctx, storage.RunStart{Source: job.name, Query: job.query, City: job.city})
+	if err != nil {
+		return fmt.Errorf("%s: %w", job.name, err)
+	}
 
-    jsonData, err := json.Marshal(data)
-    if err != nil {
-        return fmt.Errorf("failed to marshal BMKG weather forecast data: %w", err)
-    }
+	started := time.Now()
+	logger.Info("scrape started",
+		"event", "scrape_start",
+		"run_id", runID,
+		"platform", job.name,
+		"query", job.query,
+		"city", job.city,
+	)
 
-    if err := storage.SaveJSON("../../data/raw/bmkg_weather_forecast.json", jsonData); err != nil {
-        return fmt.Errorf("failed to save BMKG weather forecast data: %w", err)
-    }
+	data, recordsFound, scrapeErr := job.scrape(ctx)
+	recordsSaved := 0
+	if scrapeErr == nil {
+		path := filepath.Join(outputDir, job.filename)
+		if err := storage.SaveJSON(path, data); err != nil {
+			scrapeErr = fmt.Errorf("save %s: %w", path, err)
+		} else {
+			recordsSaved = recordsFound
+		}
+	}
 
-    return nil
+	recordsFailed := 0
+	if scrapeErr != nil {
+		recordsFailed = 1
+	}
+	finishCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	finishErr := store.Finish(finishCtx, runID, storage.RunFinish{
+		RecordsFound:  recordsFound,
+		RecordsSaved:  recordsSaved,
+		RecordsFailed: recordsFailed,
+		Err:           scrapeErr,
+	})
+	if finishErr != nil {
+		scrapeErr = errors.Join(scrapeErr, finishErr)
+	}
+
+	duration := time.Since(started)
+	if scrapeErr != nil {
+		logger.Error("scrape failed",
+			"event", "scrape_failed",
+			"run_id", runID,
+			"platform", job.name,
+			"reason", scrapeErr,
+			"duration_ms", duration.Milliseconds(),
+		)
+		return fmt.Errorf("%s: %w", job.name, scrapeErr)
+	}
+
+	logger.Info("scrape complete",
+		"event", "scrape_complete",
+		"run_id", runID,
+		"platform", job.name,
+		"fetched", recordsFound,
+		"failed", recordsFailed,
+		"duration_ms", duration.Milliseconds(),
+	)
+	return nil
 }
 
-// scrapeBMKGLatestEarthquake scrapes the latest earthquake data from BMKG
-func scrapeBMKGLatestEarthquake(ctx context.Context) error {
-    data, err := scraper.ScrapeLatestEarthquake(ctx)
-    if err != nil {
-        return fmt.Errorf("failed to scrape BMKG latest earthquake: %w", err)
-    }
+func buildJobs(value, query, city, bmkgADM4 string) ([]scrapeJob, error) {
+	available := map[string]func() scrapeJob{
+		"tokopedia": func() scrapeJob {
+			return scrapeJob{
+				name: "tokopedia", query: query, city: city, filename: "tokopedia.json",
+				scrape: func(ctx context.Context) ([]byte, int, error) {
+					data, err := scraper.ScrapeTokopedia(ctx, query)
+					return data, countJSONRecords(data), err
+				},
+			}
+		},
+		"bmkg-weather": func() scrapeJob {
+			return scrapeJob{
+				name: "bmkg-weather", query: "weather forecast", city: city, filename: "bmkg_weather_forecast.json",
+				scrape: func(ctx context.Context) ([]byte, int, error) {
+					if bmkgADM4 == "" {
+						return nil, 0, fmt.Errorf("BMKG_ADM4 is required for bmkg-weather")
+					}
+					data, err := scraper.ScrapeWeatherForecast(ctx, bmkgADM4)
+					return marshalResult(data, lenOrZero(data, func() int { return len(data.Data) }), err)
+				},
+			}
+		},
+		"bmkg-latest-earthquake": func() scrapeJob {
+			return scrapeJob{
+				name: "bmkg-latest-earthquake", query: "latest earthquake", filename: "bmkg_latest_earthquake.json",
+				scrape: func(ctx context.Context) ([]byte, int, error) {
+					data, err := scraper.ScrapeLatestEarthquake(ctx)
+					return marshalResult(data, boolCount(data != nil), err)
+				},
+			}
+		},
+		"bmkg-recent-earthquakes": func() scrapeJob {
+			return scrapeJob{
+				name: "bmkg-recent-earthquakes", query: "recent earthquakes", filename: "bmkg_recent_earthquakes.json",
+				scrape: func(ctx context.Context) ([]byte, int, error) {
+					data, err := scraper.ScrapeRecentEarthquakes(ctx)
+					return marshalResult(data, lenOrZero(data, func() int { return len(data.InfoEarthquake.Earthquakes) }), err)
+				},
+			}
+		},
+	}
 
-    jsonData, err := json.Marshal(data)
-    if err != nil {
-        return fmt.Errorf("failed to marshal BMKG latest earthquake data: %w", err)
-    }
-
-    if err := storage.SaveJSON("../../data/raw/bmkg_latest_earthquake.json", jsonData); err != nil {
-        return fmt.Errorf("failed to save BMKG latest earthquake data: %w", err)
-    }
-
-    return nil
+	var jobs []scrapeJob
+	for _, name := range strings.Split(value, ",") {
+		name = strings.TrimSpace(name)
+		factory, ok := available[name]
+		if !ok {
+			return nil, fmt.Errorf("unknown job %q", name)
+		}
+		jobs = append(jobs, factory())
+	}
+	if len(jobs) == 0 {
+		return nil, fmt.Errorf("at least one scrape job is required")
+	}
+	return jobs, nil
 }
 
-// scrapeBMKGRecentEarthquakes scrapes recent earthquakes data from BMKG
-func scrapeBMKGRecentEarthquakes(ctx context.Context) error {
-    data, err := scraper.ScrapeRecentEarthquakes(ctx)
-    if err != nil {
-        return fmt.Errorf("failed to scrape BMKG recent earthquakes: %w", err)
-    }
+func marshalResult(value any, count int, err error) ([]byte, int, error) {
+	if err != nil {
+		return nil, 0, err
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil, 0, fmt.Errorf("encode scrape response: %w", err)
+	}
+	return data, count, nil
+}
 
-    jsonData, err := json.Marshal(data)
-    if err != nil {
-        return fmt.Errorf("failed to marshal BMKG recent earthquakes data: %w", err)
-    }
+func countJSONRecords(data []byte) int {
+	var records []json.RawMessage
+	if err := json.Unmarshal(data, &records); err == nil {
+		return len(records)
+	}
+	if len(data) > 0 {
+		return 1
+	}
+	return 0
+}
 
-    if err := storage.SaveJSON("../../data/raw/bmkg_recent_earthquakes.json", jsonData); err != nil {
-        return fmt.Errorf("failed to save BMKG recent earthquakes data: %w", err)
-    }
+func lenOrZero[T any](value *T, count func() int) int {
+	if value == nil {
+		return 0
+	}
+	return count()
+}
 
-    return nil
+func boolCount(ok bool) int {
+	if ok {
+		return 1
+	}
+	return 0
+}
+
+func envOrDefault(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return fallback
 }

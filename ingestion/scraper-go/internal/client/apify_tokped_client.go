@@ -1,41 +1,65 @@
-package client 
+package client
 
-import {
+import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
+	"time"
+)
+
+const tokopediaActorID = "jupri~tokopedia-scraper"
+
+type apifyInput struct {
+	Search   string `json:"search"`
+	MaxItems int    `json:"maxItems"`
 }
 
-type ApifyTokpedClient struct {
-	ActorID string `"json:"actorId"`
-	input map[string]any  `json:"input"`
-}
-
-func RunTokopediaScraper(keyword string)([]bytes, error) {
-
-	apikey := os.Getenv("APIFY_TOKOPEDIA_TOKEN")
-
-	url := "https://api.apify.com/v2/acts/jupri~tokopedia-scraper/run-sync-get-dataset-items?token=" + apikey
-	
-	payload := ApifyTokpedClient{
-		ActorID: "jupri~tokopedia-scraper",
-		input: map[string]any{
-			"search": keyword,
-			"maxItems": 10,
-		},
+func RunTokopediaScraper(ctx context.Context, keyword string) ([]byte, error) {
+	apiKey := os.Getenv("APIFY_TOKOPEDIA_TOKEN")
+	if apiKey == "" {
+		return nil, fmt.Errorf("APIFY_TOKOPEDIA_TOKEN is required")
 	}
 
-	body, _ := json.Marshal(payload)
-	resp, err := http.Post(url, "application/json", bytes.NewBuffer(body))
+	endpoint := &url.URL{
+		Scheme: "https",
+		Host:   "api.apify.com",
+		Path:   "/v2/acts/" + tokopediaActorID + "/run-sync-get-dataset-items",
+	}
+	query := endpoint.Query()
+	query.Set("token", apiKey)
+	endpoint.RawQuery = query.Encode()
+
+	body, err := json.Marshal(apifyInput{Search: keyword, MaxItems: 10})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("encode Apify input: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create Apify request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	baseClient := &http.Client{Timeout: 2 * time.Minute}
+	resp, err := NewRetryClient(baseClient, slog.Default()).Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("run Tokopedia actor: %w", err)
 	}
 	defer resp.Body.Close()
 
-	jsonPayload, err := io.ReadAll(resp.Body)
+	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read Tokopedia actor response: %w", err)
 	}
-	return jsonPayload, nil
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("Tokopedia actor returned status %d: %s", resp.StatusCode, string(responseBody))
+	}
+	return responseBody, nil
 }

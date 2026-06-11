@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"scraper-go/internal/model"
+	"ingestion/scraper-go/internal/model"
 )
 
 // Test data helpers

@@ -1,9 +1,9 @@
 package storage
 
 import (
-    "os"
+	"os"
 )
 
 func SaveJSON(path string, data []byte) error {
-    return os.WriteFile(path, data, 0644)
+	return os.WriteFile(path, data, 0o644)
 }

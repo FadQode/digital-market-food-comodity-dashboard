@@ -21,7 +21,7 @@ func init() {
 // ScrapeWeatherForecast retrieves weather forecast for a specific province
 // provinceID: optional province ID parameter (e.g., "31" for DKI Jakarta)
 // If empty, returns forecast for all provinces
-func ScrapeWeatherForecast(ctx context.Context, provinceID string) (*model.WeatherForecast, error) {
+func ScrapeWeatherForecast(ctx context.Context, provinceID string) (*model.WeatherForecastResponse, error) {
 	forecast, err := bmkgClient.GetWeatherForecast(ctx, provinceID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to scrape weather forecast: %w", err)
@@ -30,7 +30,7 @@ func ScrapeWeatherForecast(ctx context.Context, provinceID string) (*model.Weath
 }
 
 // ScrapeLatestEarthquake retrieves the latest earthquake information
-func ScrapeLatestEarthquake(ctx context.Context) (*model.AutoGempa, error) {
+func ScrapeLatestEarthquake(ctx context.Context) (*model.EarthquakeLatestResponse, error) {
 	earthquake, err := bmkgClient.GetLatestEarthquake(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to scrape latest earthquake: %w", err)
@@ -39,7 +39,7 @@ func ScrapeLatestEarthquake(ctx context.Context) (*model.AutoGempa, error) {
 }
 
 // ScrapeRecentEarthquakes retrieves list of recent earthquakes
-func ScrapeRecentEarthquakes(ctx context.Context) (*model.RecentEarthquakes, error) {
+func ScrapeRecentEarthquakes(ctx context.Context) (*model.EarthquakeListResponse, error) {
 	earthquakes, err := bmkgClient.GetRecentEarthquakes(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to scrape recent earthquakes: %w", err)
@@ -48,7 +48,7 @@ func ScrapeRecentEarthquakes(ctx context.Context) (*model.RecentEarthquakes, err
 }
 
 // ScrapeFeltEarthquakes retrieves list of earthquakes that were felt by people
-func ScrapeFeltEarthquakes(ctx context.Context) (*model.FeltEarthquakes, error) {
+func ScrapeFeltEarthquakes(ctx context.Context) (*model.EarthquakeListResponse, error) {
 	earthquakes, err := bmkgClient.GetFeltEarthquakes(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to scrape felt earthquakes: %w", err)

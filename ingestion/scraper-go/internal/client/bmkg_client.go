@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -15,15 +16,15 @@ import (
 
 // BMKGClient interface for dependency injection and testing
 type BMKGClient interface {
-	GetWeatherForecast(ctx context.Context, provinceID string) (*model.WeatherForecast, error)
-	GetLatestEarthquake(ctx context.Context) (*model.AutoGempa, error)
-	GetRecentEarthquakes(ctx context.Context) (*model.RecentEarthquakes, error)
-	GetFeltEarthquakes(ctx context.Context) (*model.FeltEarthquakes, error)
+	GetWeatherForecast(ctx context.Context, provinceID string) (*model.WeatherForecastResponse, error)
+	GetLatestEarthquake(ctx context.Context) (*model.EarthquakeLatestResponse, error)
+	GetRecentEarthquakes(ctx context.Context) (*model.EarthquakeListResponse, error)
+	GetFeltEarthquakes(ctx context.Context) (*model.EarthquakeListResponse, error)
 }
 
 // bmkgClient implements BMKGClient interface
 type bmkgClient struct {
-	httpClient  *http.Client
+	httpClient  httpDoer
 	rateLimiter *rate.Limiter
 	userAgent   string
 	baseURLs    bmkgBaseURLs
@@ -31,10 +32,10 @@ type bmkgClient struct {
 
 // bmkgBaseURLs contains all BMKG API endpoints
 type bmkgBaseURLs struct {
-	weatherForecast    string
-	latestEarthquake   string
-	recentEarthquakes  string
-	feltEarthquakes    string
+	weatherForecast   string
+	latestEarthquake  string
+	recentEarthquakes string
+	feltEarthquakes   string
 }
 
 // BMKGClientConfig holds configuration for BMKG client
@@ -55,7 +56,7 @@ func DefaultBMKGClientConfig() *BMKGClientConfig {
 		IdleConnTimeout: 90 * time.Second,
 		UserAgent:       "Mozilla/5.0 (compatible; BMKGDataCollector/1.0; +https://github.com/yourusername/datathon)",
 		RateLimit:       rate.Limit(1.0), // 1 request per second (60/min)
-		RateBurst:       2,                // allow burst of 2 requests
+		RateBurst:       2,               // allow burst of 2 requests
 	}
 }
 
@@ -65,16 +66,18 @@ func NewBMKGClient(config *BMKGClientConfig) BMKGClient {
 		config = DefaultBMKGClientConfig()
 	}
 
-	return &bmkgClient{
-		httpClient: &http.Client{
-			Timeout: config.Timeout,
-			Transport: &http.Transport{
-				MaxIdleConns:        config.MaxIdleConns,
-				MaxIdleConnsPerHost: 10,
-				IdleConnTimeout:     config.IdleConnTimeout,
-				DisableCompression:  false,
-			},
+	baseClient := &http.Client{
+		Timeout: config.Timeout,
+		Transport: &http.Transport{
+			MaxIdleConns:        config.MaxIdleConns,
+			MaxIdleConnsPerHost: 10,
+			IdleConnTimeout:     config.IdleConnTimeout,
+			DisableCompression:  false,
 		},
+	}
+
+	return &bmkgClient{
+		httpClient:  NewRetryClient(baseClient, slog.Default()),
 		rateLimiter: rate.NewLimiter(config.RateLimit, config.RateBurst),
 		userAgent:   config.UserAgent,
 		baseURLs: bmkgBaseURLs{
@@ -89,7 +92,7 @@ func NewBMKGClient(config *BMKGClientConfig) BMKGClient {
 // GetWeatherForecast retrieves weather forecast for a specific province
 // provinceID: optional province ID parameter (e.g., "31" for DKI Jakarta)
 // If empty, returns forecast for all provinces
-func (c *bmkgClient) GetWeatherForecast(ctx context.Context, provinceID string) (*model.WeatherForecast, error) {
+func (c *bmkgClient) GetWeatherForecast(ctx context.Context, provinceID string) (*model.WeatherForecastResponse, error) {
 	// Wait for rate limiter
 	if err := c.rateLimiter.Wait(ctx); err != nil {
 		return nil, fmt.Errorf("rate limiter error: %w", err)
@@ -122,7 +125,7 @@ func (c *bmkgClient) GetWeatherForecast(ctx context.Context, provinceID string) 
 		return nil, fmt.Errorf("failed to read weather forecast response body: %w", err)
 	}
 
-	var forecast model.WeatherForecast
+	var forecast model.WeatherForecastResponse
 	if err := json.Unmarshal(body, &forecast); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal weather forecast response: %w", err)
 	}
@@ -136,7 +139,7 @@ func (c *bmkgClient) GetWeatherForecast(ctx context.Context, provinceID string) 
 }
 
 // GetLatestEarthquake retrieves the latest earthquake information
-func (c *bmkgClient) GetLatestEarthquake(ctx context.Context) (*model.AutoGempa, error) {
+func (c *bmkgClient) GetLatestEarthquake(ctx context.Context) (*model.EarthquakeLatestResponse, error) {
 	// Wait for rate limiter
 	if err := c.rateLimiter.Wait(ctx); err != nil {
 		return nil, fmt.Errorf("rate limiter error: %w", err)
@@ -164,13 +167,13 @@ func (c *bmkgClient) GetLatestEarthquake(ctx context.Context) (*model.AutoGempa,
 		return nil, fmt.Errorf("failed to read latest earthquake response body: %w", err)
 	}
 
-	var earthquake model.AutoGempa
+	var earthquake model.EarthquakeLatestResponse
 	if err := json.Unmarshal(body, &earthquake); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal latest earthquake response: %w", err)
 	}
 
 	// Validate response data
-	if earthquake.InfoGempa.Gempa.Tanggal == "" {
+	if earthquake.InfoEarthquake.Earthquake.Date == "" {
 		return nil, fmt.Errorf("latest earthquake response contains no valid data")
 	}
 
@@ -178,7 +181,7 @@ func (c *bmkgClient) GetLatestEarthquake(ctx context.Context) (*model.AutoGempa,
 }
 
 // GetRecentEarthquakes retrieves list of recent earthquakes
-func (c *bmkgClient) GetRecentEarthquakes(ctx context.Context) (*model.RecentEarthquakes, error) {
+func (c *bmkgClient) GetRecentEarthquakes(ctx context.Context) (*model.EarthquakeListResponse, error) {
 	// Wait for rate limiter
 	if err := c.rateLimiter.Wait(ctx); err != nil {
 		return nil, fmt.Errorf("rate limiter error: %w", err)
@@ -206,13 +209,13 @@ func (c *bmkgClient) GetRecentEarthquakes(ctx context.Context) (*model.RecentEar
 		return nil, fmt.Errorf("failed to read recent earthquakes response body: %w", err)
 	}
 
-	var earthquakes model.RecentEarthquakes
+	var earthquakes model.EarthquakeListResponse
 	if err := json.Unmarshal(body, &earthquakes); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal recent earthquakes response: %w", err)
 	}
 
 	// Validate response data
-	if len(earthquakes.InfoGempa.Gempa) == 0 {
+	if len(earthquakes.InfoEarthquake.Earthquakes) == 0 {
 		return nil, fmt.Errorf("recent earthquakes response contains no data")
 	}
 
@@ -220,7 +223,7 @@ func (c *bmkgClient) GetRecentEarthquakes(ctx context.Context) (*model.RecentEar
 }
 
 // GetFeltEarthquakes retrieves list of earthquakes that were felt by people
-func (c *bmkgClient) GetFeltEarthquakes(ctx context.Context) (*model.FeltEarthquakes, error) {
+func (c *bmkgClient) GetFeltEarthquakes(ctx context.Context) (*model.EarthquakeListResponse, error) {
 	// Wait for rate limiter
 	if err := c.rateLimiter.Wait(ctx); err != nil {
 		return nil, fmt.Errorf("rate limiter error: %w", err)
@@ -248,13 +251,13 @@ func (c *bmkgClient) GetFeltEarthquakes(ctx context.Context) (*model.FeltEarthqu
 		return nil, fmt.Errorf("failed to read felt earthquakes response body: %w", err)
 	}
 
-	var earthquakes model.FeltEarthquakes
+	var earthquakes model.EarthquakeListResponse
 	if err := json.Unmarshal(body, &earthquakes); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal felt earthquakes response: %w", err)
 	}
 
 	// Validate response data
-	if len(earthquakes.InfoGempa.Gempa) == 0 {
+	if len(earthquakes.InfoEarthquake.Earthquakes) == 0 {
 		return nil, fmt.Errorf("felt earthquakes response contains no data")
 	}
 
@@ -265,7 +268,6 @@ func (c *bmkgClient) GetFeltEarthquakes(ctx context.Context) (*model.FeltEarthqu
 func (c *bmkgClient) setCommonHeaders(req *http.Request) {
 	req.Header.Set("User-Agent", c.userAgent)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Accept-Encoding", "gzip, deflate")
 	req.Header.Set("Connection", "keep-alive")
 }
 
@@ -277,7 +279,7 @@ func (c *bmkgClient) validateResponse(resp *http.Response) error {
 
 	// Read error response body for detailed error message
 	bodyBytes, _ := io.ReadAll(resp.Body)
-	
+
 	switch resp.StatusCode {
 	case http.StatusBadRequest:
 		return fmt.Errorf("bad request (400): %s", string(bodyBytes))

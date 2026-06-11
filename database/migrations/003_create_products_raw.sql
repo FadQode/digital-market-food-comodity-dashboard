@@ -1,3 +1,4 @@
+-- +goose Up
 CREATE TABLE IF NOT EXISTS products_raw (
     id BIGSERIAL PRIMARY KEY,
     scrape_run_id BIGINT NOT NULL REFERENCES scrape_runs(id),
@@ -14,3 +15,6 @@ CREATE TABLE IF NOT EXISTS products_raw (
     scraped_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- +goose Down
+DROP TABLE IF EXISTS products_raw;

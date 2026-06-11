@@ -7,14 +7,15 @@ import (
 	"os"
 	"time"
 
-	"scraper-go/internal/model"
-	"scraper-go/internal/parser"
+	"ingestion/scraper-go/internal/model"
+	"ingestion/scraper-go/internal/parser"
 )
 
 // Example program demonstrating BMKG parser utilities usage
 
 func main() {
-	fmt.Println("=== BMKG Data Parser Examples ===\n")
+	fmt.Println("=== BMKG Data Parser Examples ===")
+	fmt.Println()
 
 	// Example 1: Parse weather forecast to simple format
 	fmt.Println("1. Parse Weather Forecast to Simple Format")
@@ -86,13 +87,13 @@ func exampleSimpleForecast() {
 			fmt.Printf("... and %d more entries\n", len(simple)-3)
 			break
 		}
-		fmt.Printf("  %s | %s, %s\n", 
+		fmt.Printf("  %s | %s, %s\n",
 			sf.DateTime.Format("2006-01-02 15:04"),
 			sf.Location,
 			sf.Province)
-		fmt.Printf("    Temperature: %.1f°C | Humidity: %d%%\n", 
+		fmt.Printf("    Temperature: %.1f°C | Humidity: %d%%\n",
 			sf.Temperature, sf.Humidity)
-		fmt.Printf("    Weather: %s | Wind: %s %.1f km/h\n", 
+		fmt.Printf("    Weather: %s | Wind: %s %.1f km/h\n",
 			sf.Weather, sf.WindDir, sf.WindSpeed)
 		if sf.Rainfall > 0 {
 			fmt.Printf("    Rainfall: %.1f mm\n", sf.Rainfall)
@@ -221,7 +222,8 @@ func exampleEarthquakeDistance() {
 		"Palembang": {-2.9761, 104.7754},
 	}
 
-	fmt.Println("Distance from earthquake to major cities:\n")
+	fmt.Println("Distance from earthquake to major cities:")
+	fmt.Println()
 	for city, coords := range cities {
 		distance, err := parser.CalculateEarthquakeDistance(earthquake, coords[0], coords[1])
 		if err != nil {
@@ -277,7 +279,8 @@ func exampleWeatherIcons() {
 		{model.WeatherCodeThunderstorm, "Thunderstorm"},
 	}
 
-	fmt.Println("Weather condition icons:\n")
+	fmt.Println("Weather condition icons:")
+	fmt.Println()
 	for _, wc := range weatherCodes {
 		icon := parser.GetWeatherIcon(wc.code)
 		fmt.Printf("  %s  %s\n", icon, wc.name)

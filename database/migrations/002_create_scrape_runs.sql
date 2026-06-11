@@ -1,3 +1,4 @@
+-- +goose Up
 CREATE TABLE IF NOT EXISTS scrape_runs (
     id BIGSERIAL PRIMARY KEY,
     source TEXT NOT NULL CHECK (btrim(source) <> ''),
@@ -13,3 +14,6 @@ CREATE TABLE IF NOT EXISTS scrape_runs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CHECK (finished_at IS NULL OR finished_at >= started_at)
 );
+
+-- +goose Down
+DROP TABLE IF EXISTS scrape_runs;

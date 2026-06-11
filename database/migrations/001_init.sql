@@ -1,4 +1,5 @@
 
+-- +goose Up
 CREATE TABLE IF NOT EXISTS regions (
     region_id SERIAL PRIMARY KEY,
     region_name TEXT,
@@ -50,3 +51,11 @@ CREATE TABLE IF NOT EXISTS combined_features (
     rainfall FLOAT,
     temperature FLOAT
 );
+
+-- +goose Down
+DROP TABLE IF EXISTS combined_features;
+DROP TABLE IF EXISTS demand_data;
+DROP TABLE IF EXISTS weather_data;
+DROP TABLE IF EXISTS price_data;
+DROP TABLE IF EXISTS commodities;
+DROP TABLE IF EXISTS regions;

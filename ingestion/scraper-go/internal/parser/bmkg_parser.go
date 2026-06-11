@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"scraper-go/internal/model"
+	"ingestion/scraper-go/internal/model"
 )
 
 // SimpleWeatherForecast represents a simplified weather forecast structure

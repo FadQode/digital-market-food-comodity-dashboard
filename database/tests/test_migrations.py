@@ -2,7 +2,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from database.run_sql import discover_migrations, run_migrations, run_sql_file
+from database.run_sql import (
+    LEGACY_MIGRATION_CHECKSUMS,
+    discover_migrations,
+    run_migrations,
+    run_sql_file,
+)
 
 
 class FakeCursor:
@@ -24,6 +29,9 @@ class FakeCursor:
             self.rows = list(self.connection.applied.items())
         elif normalized.startswith("INSERT INTO schema_migrations"):
             filename, checksum = parameters
+            self.connection.applied[filename] = checksum
+        elif normalized.startswith("UPDATE schema_migrations SET checksum"):
+            checksum, filename = parameters
             self.connection.applied[filename] = checksum
 
     def fetchall(self):
@@ -87,6 +95,23 @@ class MigrationTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, "Applied migration has changed"):
                 run_migrations(root, connection)
+
+    def test_upgrades_legacy_migration_checksum(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            migration = root / "001_init.sql"
+            migration.write_text("-- +goose Up\nSELECT 1;", encoding="utf-8")
+            connection = FakeConnection()
+            connection.applied[migration.name] = LEGACY_MIGRATION_CHECKSUMS[
+                migration.name
+            ]
+
+            self.assertEqual(run_migrations(root, connection), 0)
+
+        self.assertNotEqual(
+            connection.applied[migration.name],
+            LEGACY_MIGRATION_CHECKSUMS[migration.name],
+        )
 
     def test_executes_standalone_sql_file(self):
         with tempfile.TemporaryDirectory() as directory:
