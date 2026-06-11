@@ -108,6 +108,51 @@ LIMIT 20;
 Each selected job creates its own row. Status changes from `running` to
 `success` or `failed` even when the scrape itself cannot complete.
 
+For marketplace jobs, counters have these meanings:
+
+- `records_fetched`: listing items decoded from the Actor payload
+- `records_saved`: rows inserted into `products_raw`
+- `records_failed`: listing rows rejected by storage or structurally unusable
+
+## Raw Data Storage
+
+Tokopedia and Shopee jobs insert each decoded listing into `products_raw` after
+the complete Actor response has been saved to disk. Every row links back to its
+`scrape_runs.id`, exposes common inspection fields, and preserves the complete
+marketplace item in `raw_payload`.
+
+```sql
+SELECT id, scrape_run_id, source, product_name, price_text, price_value,
+       seller_location_text, result_rank
+FROM products_raw
+ORDER BY created_at DESC
+LIMIT 20;
+```
+
+`price_value` is the raw listing price. It is not yet normalized by package
+weight, variant, voucher, bundle, or minimum order, so it must not be presented
+as a commodity price per kilogram.
+
+## Data Quality Issues
+
+Phase 1 flags missing names, prices, URLs, and seller locations; duplicate
+products within a run; suspicious raw prices; empty Actor results; and adapter
+decode failures. These issues do not clean or silently discard the source data.
+
+```sql
+SELECT severity, issue_code, COUNT(*)
+FROM data_quality_log
+GROUP BY severity, issue_code
+ORDER BY severity, issue_code;
+```
+
+Reusable inspection queries are available in `database/queries`:
+
+- `check_latest_runs.sql`
+- `check_products_raw.sql`
+- `check_quality_issues.sql`
+- `check_run_summary.sql`
+
 ## Environment Variables
 
 - `DATABASE_URL`: required PostgreSQL connection string

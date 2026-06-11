@@ -58,6 +58,13 @@ Preserve the complete Actor payload. The transform stage should derive at least:
 Do not use displayed listing price directly as the commodity price until
 quantity, variants, bundles, vouchers, and minimum-order rules are checked.
 
+## Phase 1 Boundary
+
+Phase 1 stores common inspection fields in `products_raw`, preserves every
+original item as JSONB, and records obvious issues in `data_quality_log`. It
+does not calculate package quantity or price per kilogram. Those normalized
+metrics remain Phase 2 work and must be derived from the preserved raw layer.
+
 ## Quality Rules
 
 Exclude or flag:
@@ -77,10 +84,9 @@ valid listings as a regional market price.
 ## Expansion Order
 
 1. Validate one 20-result run from each marketplace and profile returned fields.
-2. Build actor-specific raw-to-common-field adapters.
-3. Insert each listing into `products_raw` with the complete JSON payload.
-4. Add quantity parsing and data-quality flags.
-5. Only then add another standardized commodity query.
+2. Review the raw rows and Phase 1 quality issues.
+3. Add quantity parsing and normalized price logic in Phase 2.
+4. Only then add another standardized commodity query.
 
 This order avoids spending budget on data that the pipeline cannot yet validate
 or normalize.

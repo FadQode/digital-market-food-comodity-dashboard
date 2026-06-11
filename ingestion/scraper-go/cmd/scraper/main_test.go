@@ -25,5 +25,8 @@ func TestBuildJobsIncludesBothMarketplaceScrapers(t *testing.T) {
 		if !job.paid || job.maxItems != 20 || job.maxChargeUSD != 0.07 {
 			t.Fatalf("job does not preserve paid API limits: %#v", job)
 		}
+		if job.adapt == nil {
+			t.Fatalf("marketplace job %s has no raw product adapter", job.name)
+		}
 	}
 }

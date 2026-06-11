@@ -58,6 +58,23 @@ class FakeConnection:
 
 
 class MigrationTests(unittest.TestCase):
+    def test_phase1_migration_contains_raw_and_quality_contract(self):
+        migration = (
+            Path(__file__).resolve().parents[1]
+            / "migrations"
+            / "007_finalize_raw_data_foundation.sql"
+        ).read_text(encoding="utf-8")
+
+        for expected in (
+            "source_product_id",
+            "product_name",
+            "price_value",
+            "issue_code",
+            "products_raw_run_source_product_uidx",
+            "products_raw_run_source_url_uidx",
+        ):
+            self.assertIn(expected, migration)
+
     def test_discovers_numbered_migrations_in_order(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

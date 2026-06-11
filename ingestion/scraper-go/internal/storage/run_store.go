@@ -9,9 +9,28 @@ import (
 	_ "github.com/lib/pq"
 )
 
-type RunStore struct {
+// Repository owns all application database access for scraper runs and results.
+type Repository struct {
 	db *sql.DB
 }
+
+const startRunSQL = `
+	INSERT INTO scrape_runs (source, product_query, city, status, metadata)
+	VALUES ($1, $2, NULLIF($3, ''), 'running', $4::jsonb)
+	RETURNING id
+`
+
+const finishRunSQL = `
+	UPDATE scrape_runs
+	SET finished_at = CURRENT_TIMESTAMP,
+		status = $2,
+		records_found = $3,
+		records_saved = $4,
+		records_failed = $5,
+		records_fetched = $3,
+		error_message = NULLIF($6, '')
+	WHERE id = $1
+`
 
 type RunStart struct {
 	Source       string
@@ -28,7 +47,7 @@ type RunFinish struct {
 	Err           error
 }
 
-func OpenRunStore(ctx context.Context, databaseURL string) (*RunStore, error) {
+func OpenRepository(ctx context.Context, databaseURL string) (*Repository, error) {
 	if databaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required")
 	}
@@ -40,14 +59,14 @@ func OpenRunStore(ctx context.Context, databaseURL string) (*RunStore, error) {
 		db.Close()
 		return nil, fmt.Errorf("connect to database: %w", err)
 	}
-	return &RunStore{db: db}, nil
+	return &Repository{db: db}, nil
 }
 
-func (s *RunStore) Close() error {
-	return s.db.Close()
+func (r *Repository) Close() error {
+	return r.db.Close()
 }
 
-func (s *RunStore) Start(ctx context.Context, run RunStart) (int64, error) {
+func (r *Repository) Start(ctx context.Context, run RunStart) (int64, error) {
 	metadata, err := json.Marshal(map[string]any{
 		"product_query":  run.Query,
 		"city":           run.City,
@@ -59,18 +78,14 @@ func (s *RunStore) Start(ctx context.Context, run RunStart) (int64, error) {
 	}
 
 	var id int64
-	err = s.db.QueryRowContext(ctx, `
-		INSERT INTO scrape_runs (source, product_query, city, status, metadata)
-		VALUES ($1, $2, NULLIF($3, ''), 'running', $4::jsonb)
-		RETURNING id
-	`, run.Source, run.Query, run.City, metadata).Scan(&id)
+	err = r.db.QueryRowContext(ctx, startRunSQL, run.Source, run.Query, run.City, metadata).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("start scrape run: %w", err)
 	}
 	return id, nil
 }
 
-func (s *RunStore) Finish(ctx context.Context, id int64, result RunFinish) error {
+func (r *Repository) Finish(ctx context.Context, id int64, result RunFinish) error {
 	status := "success"
 	errorMessage := ""
 	if result.Err != nil {
@@ -78,17 +93,8 @@ func (s *RunStore) Finish(ctx context.Context, id int64, result RunFinish) error
 		errorMessage = result.Err.Error()
 	}
 
-	resultValue, err := s.db.ExecContext(ctx, `
-		UPDATE scrape_runs
-		SET finished_at = CURRENT_TIMESTAMP,
-			status = $2,
-			records_found = $3,
-			records_saved = $4,
-			records_failed = $5,
-			records_fetched = $3,
-			error_message = NULLIF($6, '')
-		WHERE id = $1
-	`, id, status, result.RecordsFound, result.RecordsSaved, result.RecordsFailed, errorMessage)
+	resultValue, err := r.db.ExecContext(ctx, finishRunSQL,
+		id, status, result.RecordsFound, result.RecordsSaved, result.RecordsFailed, errorMessage)
 	if err != nil {
 		return fmt.Errorf("finish scrape run %d: %w", id, err)
 	}

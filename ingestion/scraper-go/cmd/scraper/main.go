@@ -13,11 +13,21 @@ import (
 	"strings"
 	"time"
 
+	"ingestion/scraper-go/internal/adapter"
+	"ingestion/scraper-go/internal/model"
+	"ingestion/scraper-go/internal/quality"
 	"ingestion/scraper-go/internal/scraper"
 	"ingestion/scraper-go/internal/storage"
 )
 
 const defaultJobs = "bmkg-latest-earthquake,bmkg-recent-earthquakes"
+
+type scrapeRepository interface {
+	Start(context.Context, storage.RunStart) (int64, error)
+	Finish(context.Context, int64, storage.RunFinish) error
+	InsertRawProducts(context.Context, []model.RawProduct) (int, int, error)
+	InsertQualityIssues(context.Context, []quality.Issue) (int, error)
+}
 
 type scrapeJob struct {
 	name         string
@@ -28,6 +38,7 @@ type scrapeJob struct {
 	maxItems     int
 	maxChargeUSD float64
 	scrape       func(context.Context) ([]byte, int, error)
+	adapt        func([]byte, int64, string) ([]model.RawProduct, error)
 }
 
 func main() {
@@ -104,7 +115,7 @@ func run() int {
 		}
 	}
 
-	store, err := storage.OpenRunStore(ctx, os.Getenv("DATABASE_URL"))
+	store, err := storage.OpenRepository(ctx, os.Getenv("DATABASE_URL"))
 	if err != nil {
 		logger.Error("scraper initialization failed", "event", "scraper_init_failed", "reason", err)
 		return 1
@@ -130,7 +141,7 @@ func run() int {
 	return 0
 }
 
-func executeJob(ctx context.Context, store *storage.RunStore, logger *slog.Logger, outputDir string, job scrapeJob) error {
+func executeJob(ctx context.Context, store scrapeRepository, logger *slog.Logger, outputDir string, job scrapeJob) error {
 	runID, err := store.Start(ctx, storage.RunStart{
 		Source:       job.name,
 		Query:        job.query,
@@ -155,19 +166,69 @@ func executeJob(ctx context.Context, store *storage.RunStore, logger *slog.Logge
 
 	data, recordsFound, scrapeErr := job.scrape(ctx)
 	recordsSaved := 0
+	recordsFailed := 0
 	outputPath := ""
 	if scrapeErr == nil {
 		outputPath = runOutputPath(outputDir, job.filename, runID)
 		if err := storage.SaveJSON(outputPath, data); err != nil {
 			scrapeErr = fmt.Errorf("save %s: %w", outputPath, err)
-		} else {
+		} else if job.adapt == nil {
 			recordsSaved = recordsFound
 		}
 	}
 
-	recordsFailed := 0
+	if scrapeErr == nil && job.adapt != nil {
+		products, adaptErr := job.adapt(data, runID, job.query)
+		if adaptErr != nil {
+			_, issueErr := store.InsertQualityIssues(ctx, []quality.Issue{
+				quality.AdapterDecodeFailed(runID, job.name, adaptErr),
+			})
+			scrapeErr = errors.Join(adaptErr, issueErr)
+		} else {
+			recordsFound = len(products)
+			logger.Info("marketplace products mapped",
+				"event", "products_mapped",
+				"run_id", runID,
+				"source", job.name,
+				"count", recordsFound,
+			)
+			inserted, failed, insertErr := store.InsertRawProducts(ctx, products)
+			recordsSaved = inserted
+			recordsFailed = failed
+			logger.Info("marketplace products inserted",
+				"event", "products_inserted",
+				"run_id", runID,
+				"source", job.name,
+				"inserted", inserted,
+				"failed", failed,
+			)
+
+			issues := quality.CheckProducts(products)
+			if len(products) == 0 {
+				issues = append(issues, quality.EmptyActorResult(runID, job.name))
+			}
+			for _, product := range products {
+				if product.ID == 0 {
+					issues = append(issues, quality.RawProductInsertFailed(product))
+				}
+			}
+			qualityInserted, issueErr := store.InsertQualityIssues(ctx, issues)
+			if qualityInserted > 0 {
+				logger.Warn("marketplace quality issues found",
+					"event", "quality_issues_found",
+					"run_id", runID,
+					"source", job.name,
+					"count", qualityInserted,
+				)
+			}
+			scrapeErr = errors.Join(insertErr, issueErr)
+		}
+	}
+
 	if scrapeErr != nil {
-		recordsFailed = 1
+		if recordsFailed == 0 {
+			recordsFailed = 1
+		}
 	}
 	finishCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -198,6 +259,7 @@ func executeJob(ctx context.Context, store *storage.RunStore, logger *slog.Logge
 		"run_id", runID,
 		"platform", job.name,
 		"fetched", recordsFound,
+		"saved", recordsSaved,
 		"failed", recordsFailed,
 		"output_path", outputPath,
 		"duration_ms", duration.Milliseconds(),
@@ -216,6 +278,7 @@ func buildJobs(value, query, city, bmkgADM4 string, maxItems int, maxChargeUSD f
 		"tokopedia": func() scrapeJob {
 			return scrapeJob{
 				name: "tokopedia", query: query, city: city, filename: "tokopedia.json", paid: true, maxItems: maxItems, maxChargeUSD: maxChargeUSD,
+				adapt: adapter.TokopediaToRawProducts,
 				scrape: func(ctx context.Context) ([]byte, int, error) {
 					data, err := scraper.ScrapeTokopedia(ctx, query, maxItems, maxChargeUSD)
 					return data, countJSONRecords(data), err
@@ -225,6 +288,7 @@ func buildJobs(value, query, city, bmkgADM4 string, maxItems int, maxChargeUSD f
 		"shopee": func() scrapeJob {
 			return scrapeJob{
 				name: "shopee", query: query, city: city, filename: "shopee.json", paid: true, maxItems: maxItems, maxChargeUSD: maxChargeUSD,
+				adapt: adapter.ShopeeToRawProducts,
 				scrape: func(ctx context.Context) ([]byte, int, error) {
 					data, err := scraper.ScrapeShopee(ctx, query, maxItems, maxChargeUSD)
 					return data, countJSONRecords(data), err
